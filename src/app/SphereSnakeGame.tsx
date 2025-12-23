@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import * as THREE from "three";
 import { MenuScreen, ControlType, Difficulty } from "@/game/types";
 import { getGameConfig } from "@/game/config";
