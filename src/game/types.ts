@@ -16,6 +16,7 @@ export type Barrier = {
 export type MenuScreen = 'main' | 'playing' | 'settings' | 'store';
 export type ControlType = 'keyboard' | 'mouse';
 export type Difficulty = 'easy' | 'medium' | 'hard';
+export type WorldState = 'sphere' | 'void' | 'transitioning';
 
 export interface DifficultySettings {
   speedMultiplier: number;
@@ -43,4 +44,5 @@ export interface GameConfig {
   dotSurfaceRadius: number;
   acceleration: number;
   deceleration: number;
+  portalUnlockThreshold: number;
 }

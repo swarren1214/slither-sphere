@@ -35,5 +35,6 @@ export function getGameConfig(difficulty: Difficulty): GameConfig {
     dotSurfaceRadius: R + dotLift,
     acceleration: 300, // Speed units per second squared
     deceleration: 250, // Speed units per second squared
+    portalUnlockThreshold: 5, // Fruits needed to unlock portal (change for testing!)
   };
 }

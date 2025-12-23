@@ -1,7 +1,8 @@
-import { ControlType } from "./types";
+import { ControlType, WorldState } from "./types";
 
 export function setupControls(
   controlTypeRef: React.MutableRefObject<ControlType>,
+  worldStateRef: React.MutableRefObject<WorldState>,
   mountRef: React.MutableRefObject<HTMLDivElement | null>,
   isPausedRef: React.MutableRefObject<boolean>,
   isGameOverRef: React.MutableRefObject<boolean>,
@@ -11,6 +12,8 @@ export function setupControls(
   let steer = 0;
   let mouseX = 0;
   let forward = 0; // 0 = stopped, 1 = forward
+  let vertical = 0; // -1 = down, 0 = level, 1 = up (for void mode)
+  let shift = false; // For void mode forward movement
   let leftMouseDown = false;
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -21,7 +24,19 @@ export function setupControls(
       steer = -1;
       e.preventDefault();
     } else if (e.key === "ArrowUp") {
-      forward = 1;
+      if (worldStateRef.current === 'void') {
+        vertical = 1; // Up in void
+      } else {
+        forward = 1; // Forward on sphere
+      }
+      e.preventDefault();
+    } else if (e.key === "ArrowDown") {
+      if (worldStateRef.current === 'void') {
+        vertical = -1; // Down in void
+      }
+      e.preventDefault();
+    } else if (e.key === "Shift") {
+      shift = true;
       e.preventDefault();
     } else if (e.key === "p" || e.key === "P") {
       if (!isGameOverRef.current) {
@@ -42,8 +57,18 @@ export function setupControls(
     } else if (e.key === "ArrowRight" && steer === -1) {
       steer = 0;
       e.preventDefault();
-    } else if (e.key === "ArrowUp" && forward === 1) {
-      forward = 0;
+    } else if (e.key === "ArrowUp") {
+      if (worldStateRef.current === 'void') {
+        vertical = 0;
+      } else {
+        forward = 0;
+      }
+      e.preventDefault();
+    } else if (e.key === "ArrowDown" && vertical === -1) {
+      vertical = 0;
+      e.preventDefault();
+    } else if (e.key === "Shift") {
+      shift = false;
       e.preventDefault();
     }
   };
@@ -98,6 +123,8 @@ export function setupControls(
   return {
     getSteer: () => steer,
     getForward: () => forward,
+    getVertical: () => vertical,
+    getShift: () => shift,
     cleanup: () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);

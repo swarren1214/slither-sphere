@@ -10,6 +10,8 @@ import { createSnake } from "@/game/snake";
 import { createDots } from "@/game/dots";
 import { createBarriers } from "@/game/barriers";
 import { setupControls } from "@/game/controls";
+import { createPortal, createVoidEnvironment, animatePortal } from "@/game/portal";
+import { WorldState } from "@/game/types";
 
 export default function SphereSnakeGame() {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -19,12 +21,17 @@ export default function SphereSnakeGame() {
   const [isGameOver, setIsGameOver] = useState(false);
   const isGameOverRef = useRef(false);
   const [collisionType, setCollisionType] = useState<'barrier' | 'self'>('barrier');
+  const [isTransitioning, setIsTransitioning] = useState(false);
   const restartGameRef = useRef<(() => void) | null>(null);
   const [menuScreen, setMenuScreen] = useState<MenuScreen>('main');
   const startGameRef = useRef<(() => void) | null>(null);
   const [controlType, setControlType] = useState<ControlType>('keyboard');
   const controlTypeRef = useRef<ControlType>('keyboard');
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [cameraZoom, setCameraZoom] = useState(1.0);
+  
+  // Get portal unlock threshold from config
+  const portalUnlockThreshold = getGameConfig(difficulty).portalUnlockThreshold;
 
   // Sync control type ref
   useEffect(() => {
@@ -61,6 +68,7 @@ export default function SphereSnakeGame() {
       barrierLift,
       acceleration,
       deceleration,
+      portalUnlockThreshold,
     } = config;
 
     // --- Scene ---
@@ -115,9 +123,25 @@ export default function SphereSnakeGame() {
     // Create barriers
     const { barriers } = createBarriers(scene, barrierCount, barrierRadius, barrierHeight, R, barrierLift);
 
+    // World state tracking
+    let worldState: WorldState = 'sphere';
+    const worldStateRef: React.MutableRefObject<WorldState> = { current: worldState };
+
+    // Portal and void environment (created when unlocked)
+    let spherePortal: ReturnType<typeof createPortal> | null = null;
+    let voidPortal: ReturnType<typeof createPortal> | null = null;
+    let voidEnvironment: ReturnType<typeof createVoidEnvironment> | null = null;
+    let portalCooldown = 0; // Prevent rapid portal transitions
+    
+    // Void state
+    let voidPosition = new THREE.Vector3(0, 0, 0); // Snake position in void
+    let voidVelocity = new THREE.Vector3(1, 0, 0); // Snake direction in void
+    let voidUpVector = new THREE.Vector3(0, 1, 0); // Snake's up direction in void
+
     // Setup controls
     controls = setupControls(
       controlTypeRef,
+      worldStateRef,
       mountRef,
       isPausedRef,
       isGameOverRef,
@@ -169,166 +193,435 @@ export default function SphereSnakeGame() {
         return;
       }
 
-      // Get forward input
-      const forwardInput = controls!.getForward();
-      
-      // Calculate target speed based on input
-      const targetSpeed = forwardInput === 1 ? moveSpeed : 0;
-
-      // Apply acceleration/deceleration with inertia
-      if (currentSpeed < targetSpeed) {
-        // Accelerating
-        currentSpeed = Math.min(currentSpeed + acceleration * dt, targetSpeed);
-      } else if (currentSpeed > targetSpeed) {
-        // Decelerating
-        currentSpeed = Math.max(currentSpeed - deceleration * dt, targetSpeed);
-      }
-
-      // Steering: rotate heading tangent around the local normal
-      const steer = controls!.getSteer();
-      if (steer !== 0) {
-        headingTangent = rotateAroundAxis(headingTangent, headNormal, steer * steerSpeed * dt).normalize();
-        // Re-project tangent (numerical drift)
-        headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
-      }
-
-      // Move: rotate headNormal along the great-circle defined by tangent direction.
-      // Only move if speed is non-zero
-      if (Math.abs(currentSpeed) > 0.1) {
-        // Axis is perpendicular to both normal and heading (defines plane of travel).
+      // Create portal when threshold reached (only on sphere)
+      if (dotsEatenLocal >= portalUnlockThreshold && !spherePortal && worldState === 'sphere' && scene) {
+        // Create portal on sphere surface ahead of the player
+        // Calculate a point ahead on the sphere surface
+        const forwardAngle = 0.3; // Radians ahead (about 60 degrees)
         tmpAxis.crossVectors(headNormal, headingTangent).normalize();
-        const angle = (currentSpeed / R) * dt;
-
-        headNormal = rotateAroundAxis(headNormal, tmpAxis, angle).normalize();
-        headingTangent = rotateAroundAxis(headingTangent, tmpAxis, angle).normalize();
-        headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
-
-        const distanceMoved = Math.abs(currentSpeed) * dt;
-        distanceSinceLastSegment += distanceMoved;
+        const portalNormal = rotateAroundAxis(headNormal.clone(), tmpAxis, forwardAngle).normalize();
         
-        // Only add new segment positions when we've traveled enough distance
-        while (distanceSinceLastSegment >= segmentAddThreshold) {
-          segmentNormals.unshift(headNormal.clone());
-          distanceSinceLastSegment -= segmentAddThreshold;
-          
-          // Keep only enough positions for the snake length plus small buffer
-          const maxPositions = Math.min(segmentCount * 2 + 5, 440);
-          while (segmentNormals.length > maxPositions) {
-            segmentNormals.pop();
-          }
-        }
-      }
-
-      // Update snake meshes
-      headMesh.position.copy(headNormal).multiplyScalar(snakeRadius);
-      headMesh.lookAt(tmpVec.copy(headNormal).multiplyScalar(snakeRadius + 1));
-
-      // Build smooth tube path using recent positions
-      const tubePathPoints: THREE.Vector3[] = [];
-      const pointsToUse = Math.min(segmentCount * 2, segmentNormals.length);
-      
-      // Sample evenly across the available positions
-      for (let i = 0; i < pointsToUse; i++) {
-        tubePathPoints.push(segmentNormals[i].clone().multiplyScalar(snakeRadius));
-      }
-      
-      // Only update tube if we have enough points
-      if (tubePathPoints.length >= 2) {
-        const curve = new THREE.CatmullRomCurve3(tubePathPoints);
-        const newTubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, tubeRadius, radialSegments, false);
+        // Position portal on the sphere surface
+        const portalPos = portalNormal.clone().multiplyScalar(snakeRadius);
+        spherePortal = createPortal(scene!, portalPos, false);
         
-        tubeMesh.geometry.dispose();
-        tubeMesh.geometry = newTubeGeometry;
+        // Orient portal to stand upright on sphere surface
+        // Portal should face tangentially (player can fly through it)
+        const tangent = headingTangent.clone().normalize();
+        const right = new THREE.Vector3().crossVectors(portalNormal, tangent).normalize();
+        const actualTangent = new THREE.Vector3().crossVectors(right, portalNormal).normalize();
         
-        // Position and orient tail cone at the end
-        const tailPosition = tubePathPoints[tubePathPoints.length - 1];
-        const beforeTail = tubePathPoints[Math.max(0, tubePathPoints.length - 2)];
+        // Create rotation matrix: X=right, Y=up(normal), Z=tangent
+        const matrix = new THREE.Matrix4();
+        matrix.makeBasis(right, portalNormal, actualTangent);
+        spherePortal.portalGroup.setRotationFromMatrix(matrix);
         
-        // Calculate direction and position hemisphere cap at tube end
-        const tailDirection = tailPosition.clone().sub(beforeTail).normalize();
-        
-        // Position hemisphere cap flush with tube end
-        const capOffset = tailDirection.clone().multiplyScalar(tubeRadius * 0.01);
-        tailCapMesh.position.copy(tailPosition).add(capOffset);
-        
-        // Orient the cap so the flat side aligns with tube end
-        tailCapMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tailDirection);
-      }
-
-      // Eat dots
-      const headPos = headMesh.position;
-      for (const dot of dots) {
-        if (!dot.mesh.visible) continue;
-        if (headPos.distanceTo(dot.mesh.position) < eatDistance) {
-          dot.mesh.visible = false;
-          dotsEatenLocal += 1;
-          setDotsEaten(dotsEatenLocal);
-          // Grow slowly: +1 segment per dot
-          segmentCount = Math.min(segmentCount + 1, 220);
-          // Respawn quickly somewhere else.
-          setTimeout(() => respawnDot(dot), 180);
-        }
-      }
-
-      // Check barrier collisions using precise distance to curve
-      for (const barrier of barriers) {
-        if (barrier.curve && barrier.tubeRadius) {
-          // Sample points along the curve and find closest point
-          let minDistance = Infinity;
-          const samples = 30; // Increased samples for more accurate detection
-          
-          for (let i = 0; i <= samples; i++) {
-            const t = i / samples;
-            const curvePoint = barrier.curve.getPoint(t);
-            const distance = headPos.distanceTo(curvePoint);
-            if (distance < minDistance) {
-              minDistance = distance;
+        // Clear any barriers near the portal to ensure it's accessible
+        const clearRadius = 150; // Clear barriers within this radius
+        barriers.forEach(barrier => {
+          if (barrier.wallSegments) {
+            // Check if any part of this barrier is too close to the portal
+            let tooClose = false;
+            barrier.wallSegments.forEach(segment => {
+              if (segment.position.distanceTo(portalPos) < clearRadius) {
+                tooClose = true;
+              }
+            });
+            
+            // Hide barriers that are too close
+            if (tooClose) {
+              barrier.wallSegments.forEach(segment => {
+                segment.visible = false;
+              });
             }
           }
+        });
+      }
+
+      // Animate portals
+      if (spherePortal) {
+        animatePortal(spherePortal, t);
+      }
+      if (voidPortal) {
+        animatePortal(voidPortal, t);
+      }
+
+      // Decrease portal cooldown
+      if (portalCooldown > 0) {
+        portalCooldown -= dt;
+      }
+
+      // Handle different movement based on world state
+      if (worldState === 'sphere') {
+        // === SPHERE WORLD LOGIC ===
+        handleSphereMovement();
+      } else if (worldState === 'void') {
+        // === VOID WORLD LOGIC ===
+        handleVoidMovement();
+      }
+
+      function handleSphereMovement() {
+        // Get forward input
+        const forwardInput = controls!.getForward();
+        
+        // Calculate target speed based on input
+        const targetSpeed = forwardInput === 1 ? moveSpeed : 0;
+
+        // Apply acceleration/deceleration with inertia
+        if (currentSpeed < targetSpeed) {
+          // Accelerating
+          currentSpeed = Math.min(currentSpeed + acceleration * dt, targetSpeed);
+        } else if (currentSpeed > targetSpeed) {
+          // Decelerating
+          currentSpeed = Math.max(currentSpeed - deceleration * dt, targetSpeed);
+        }
+
+        // Steering: rotate heading tangent around the local normal
+        const steer = controls!.getSteer();
+        if (steer !== 0) {
+          headingTangent = rotateAroundAxis(headingTangent, headNormal, steer * steerSpeed * dt).normalize();
+          // Re-project tangent (numerical drift)
+          headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
+        }
+
+        // Move: rotate headNormal along the great-circle defined by tangent direction.
+        // Only move if speed is non-zero
+        if (Math.abs(currentSpeed) > 0.1) {
+          // Axis is perpendicular to both normal and heading (defines plane of travel).
+          tmpAxis.crossVectors(headNormal, headingTangent).normalize();
+          const angle = (currentSpeed / R) * dt;
+
+          headNormal = rotateAroundAxis(headNormal, tmpAxis, angle).normalize();
+          headingTangent = rotateAroundAxis(headingTangent, tmpAxis, angle).normalize();
+          headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
+
+          const distanceMoved = Math.abs(currentSpeed) * dt;
+          distanceSinceLastSegment += distanceMoved;
           
-          // Collision if head is within combined radius (with buffer for forgiveness)
-          // 7 is snake head radius, using +4 instead of +6 for more forgiveness
-          if (minDistance < barrier.tubeRadius + 4) {
-            // GAME OVER!
-            console.log('Barrier collision! Distance:', minDistance, 'Barrier radius:', barrier.tubeRadius);
-            setCollisionType('barrier');
-            isGameOverRef.current = true;
-            setIsGameOver(true);
-            break;
+          // Only add new segment positions when we've traveled enough distance
+          while (distanceSinceLastSegment >= segmentAddThreshold) {
+            segmentNormals.unshift(headNormal.clone());
+            distanceSinceLastSegment -= segmentAddThreshold;
+            
+            // Keep only enough positions for the snake length plus small buffer
+            const maxPositions = Math.min(segmentCount * 2 + 5, 440);
+            while (segmentNormals.length > maxPositions) {
+              segmentNormals.pop();
+            }
           }
+        }
+
+        // Update snake meshes for sphere
+        const headPos = headNormal.clone().multiplyScalar(snakeRadius);
+        headMesh.position.copy(headPos);
+        headMesh.lookAt(tmpVec.copy(headNormal).multiplyScalar(snakeRadius + 1));
+
+        updateSnakeBody();
+
+        // Check for portal collision
+        if (spherePortal && portalCooldown <= 0) {
+          const distanceToPortal = headPos.distanceTo(spherePortal.portalGroup.position);
+          if (distanceToPortal < 60) { // Increased from 25 to match larger portal
+            transitionToVoid();
+          }
+        }
+
+        // Sphere-specific collision detection
+        checkSphereCollisions(headPos);
+      }
+
+      function handleVoidMovement() {
+        // In void, only move forward when Shift is held
+        const shiftHeld = controls!.getShift();
+        if (shiftHeld) {
+          currentSpeed = moveSpeed;
+        } else {
+          currentSpeed = 0;
+        }
+
+        // Steering affects direction
+        const steer = controls!.getSteer();
+        const vertical = controls!.getVertical();
+        
+        if (steer !== 0) {
+          // Rotate velocity around up vector
+          const rotationAngle = steer * steerSpeed * dt;
+          voidVelocity.applyAxisAngle(voidUpVector, rotationAngle);
+        }
+
+        if (vertical !== 0) {
+          // Rotate velocity up or down
+          const rightVector = new THREE.Vector3().crossVectors(voidVelocity, voidUpVector).normalize();
+          const verticalAngle = vertical * steerSpeed * dt;
+          voidVelocity.applyAxisAngle(rightVector, verticalAngle);
+          voidUpVector.applyAxisAngle(rightVector, verticalAngle);
+        }
+
+        // Normalize vectors
+        voidVelocity.normalize();
+        voidUpVector.normalize();
+
+        // Move forward in void only if shift is held
+        if (currentSpeed > 0) {
+          const movement = voidVelocity.clone().multiplyScalar(currentSpeed * dt);
+          voidPosition.add(movement);
+
+          // Add segments based on distance traveled
+          distanceSinceLastSegment += currentSpeed * dt;
+          while (distanceSinceLastSegment >= segmentAddThreshold) {
+            segmentNormals.unshift(voidPosition.clone());
+            distanceSinceLastSegment -= segmentAddThreshold;
+            
+            const maxPositions = Math.min(segmentCount * 2 + 5, 440);
+            while (segmentNormals.length > maxPositions) {
+              segmentNormals.pop();
+            }
+          }
+        }
+
+        // Update snake position in void
+        headMesh.position.copy(voidPosition);
+        const lookTarget = voidPosition.clone().add(voidVelocity);
+        headMesh.lookAt(lookTarget);
+
+        updateSnakeBody();
+
+        // Check for void portal collision
+        if (voidPortal && portalCooldown <= 0) {
+          const distanceToPortal = voidPosition.distanceTo(voidPortal.portalGroup.position);
+          if (distanceToPortal < 60) { // Increased from 25 to match larger portal
+            transitionToSphere();
+          }
+        }
+
+        // No collision detection in void!
+      }
+
+      function updateSnakeBody() {
+        // Build smooth tube path using recent positions
+        const tubePathPoints: THREE.Vector3[] = [];
+        const pointsToUse = Math.min(segmentCount * 2, segmentNormals.length);
+        
+        // Sample evenly across the available positions
+        for (let i = 0; i < pointsToUse; i++) {
+          if (worldState === 'sphere') {
+            tubePathPoints.push(segmentNormals[i].clone().multiplyScalar(snakeRadius));
+          } else {
+            // In void mode, add wave effect like a Chinese dragon
+            const basePos = segmentNormals[i].clone();
+            
+            // Create wave motion
+            const waveFrequency = 0.3; // How many waves along the body
+            const waveAmplitude = 8; // How far the wave moves (increased for more dramatic effect)
+            const waveSpeed = 0.002; // How fast the wave travels
+            
+            // Calculate wave offset based on segment index and time
+            const phase = i * waveFrequency + t * waveSpeed;
+            const waveOffset = Math.sin(phase) * waveAmplitude;
+            
+            // Apply wave perpendicular to velocity direction
+            const rightVector = new THREE.Vector3().crossVectors(voidVelocity, voidUpVector).normalize();
+            const waveVector = rightVector.multiplyScalar(waveOffset);
+            
+            // Also add a secondary vertical wave for more dragon-like motion
+            const verticalPhase = i * waveFrequency * 0.7 + t * waveSpeed * 0.8;
+            const verticalOffset = Math.sin(verticalPhase) * waveAmplitude * 0.6;
+            const verticalVector = voidUpVector.clone().multiplyScalar(verticalOffset);
+            
+            tubePathPoints.push(basePos.add(waveVector).add(verticalVector));
+          }
+        }
+        
+        // Only update tube if we have enough points
+        if (tubePathPoints.length >= 2) {
+          const curve = new THREE.CatmullRomCurve3(tubePathPoints);
+          const newTubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, tubeRadius, radialSegments, false);
+          
+          tubeMesh.geometry.dispose();
+          tubeMesh.geometry = newTubeGeometry;
+          
+          // Position and orient tail cone at the end
+          const tailPosition = tubePathPoints[tubePathPoints.length - 1];
+          const beforeTail = tubePathPoints[Math.max(0, tubePathPoints.length - 2)];
+          
+          // Calculate direction and position hemisphere cap at tube end
+          const tailDirection = tailPosition.clone().sub(beforeTail).normalize();
+          
+          // Position hemisphere cap flush with tube end
+          const capOffset = tailDirection.clone().multiplyScalar(tubeRadius * 0.01);
+          tailCapMesh.position.copy(tailPosition).add(capOffset);
+          
+          // Orient the cap so the flat side aligns with tube end
+          tailCapMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tailDirection);
         }
       }
 
-      // Check self-collision (snake running into itself)
-      // Only check if snake has grown beyond initial segments
-      // Start checking from a safe distance to avoid neck collision
-      if (segmentCount > initialSegments + 5) {
-        // Skip first 16 positions (neck area) to avoid false collisions
-        const startCheck = 16;
-        const endCheck = Math.min(segmentCount * 2, segmentNormals.length);
+      function transitionToVoid() {
+        setIsTransitioning(true);
+        worldState = 'void';
+        worldStateRef.current = 'void';
+        portalCooldown = 2.0; // 2 second cooldown
         
-        for (let i = startCheck; i < endCheck; i++) {
-          const segmentPos = segmentNormals[i].clone().multiplyScalar(snakeRadius);
-          const collisionDistance = 13; // Slightly smaller for more forgiveness
-          if (headPos.distanceTo(segmentPos) < collisionDistance) {
-            // GAME OVER!
-            console.log('Self-collision! Distance:', headPos.distanceTo(segmentPos), 'at segment index:', i, 'segmentCount:', segmentCount);
-            setCollisionType('self');
-            isGameOverRef.current = true;
-            setIsGameOver(true);
-            break;
+        // Create void environment
+        if (!voidEnvironment && scene) {
+          voidEnvironment = createVoidEnvironment(scene!);
+        }
+
+        // Hide sphere world elements
+        stars.visible = false;
+        dots.forEach(dot => dot.mesh.visible = false);
+        barriers.forEach(barrier => {
+          barrier.wallSegments?.forEach(segment => segment.visible = false);
+        });
+        if (spherePortal) {
+          spherePortal.portalGroup.visible = false;
+        }
+
+        // Initialize void position and direction - move forward from portal
+        voidPosition = headNormal.clone().multiplyScalar(snakeRadius).add(headingTangent.clone().multiplyScalar(100));
+        voidVelocity = headingTangent.clone();
+        voidUpVector = headNormal.clone();
+
+        // Create return portal in void
+        const returnPortalPos = voidPosition.clone().add(voidVelocity.clone().multiplyScalar(200));
+        if (scene) {
+          voidPortal = createPortal(scene!, returnPortalPos, true);
+        }
+        
+        // Clear old segment data and start fresh in void
+        segmentNormals.length = 0;
+        for (let i = 0; i < segmentCount * 2; i++) {
+          const backPos = voidPosition.clone().sub(voidVelocity.clone().multiplyScalar(i * 3));
+          segmentNormals.push(backPos);
+        }
+
+        setTimeout(() => setIsTransitioning(false), 500);
+      }
+
+      function transitionToSphere() {
+        setIsTransitioning(true);
+        worldState = 'sphere';
+        portalCooldown = 2.0; // 2 second cooldown
+        worldStateRef.current = 'sphere';
+
+        // Show sphere world elements
+        stars.visible = true;
+        dots.forEach(dot => {
+          if (Math.random() > 0.5) dot.mesh.visible = true;
+        });
+        barriers.forEach(barrier => {
+          barrier.wallSegments?.forEach(segment => segment.visible = true);
+        });
+        if (spherePortal) {
+          spherePortal.portalGroup.visible = true;
+        }
+
+        // Hide void elements
+        if (voidEnvironment) {
+          voidEnvironment.voidStars.visible = false;
+          voidEnvironment.nebula.visible = false;
+        }
+        if (voidPortal) {
+          voidPortal.portalGroup.visible = false;
+        }
+
+        // Reset to sphere coordinates
+        headNormal = new THREE.Vector3(0, 0, 1);
+        headingTangent = new THREE.Vector3(1, 0, 0);
+        
+        // Rebuild segment trail
+        segmentNormals.length = 0;
+        for (let i = 0; i < segmentCount * 2; i++) {
+          const trailNormal = headNormal.clone();
+          const backwardTangent = headingTangent.clone().negate();
+          const angleOffset = (i * segmentSpacing) / R;
+          const axis = new THREE.Vector3().crossVectors(headNormal, backwardTangent).normalize();
+          const rotatedNormal = rotateAroundAxis(trailNormal, axis, angleOffset).normalize();
+          segmentNormals.push(rotatedNormal);
+        }
+
+        setTimeout(() => setIsTransitioning(false), 500);
+      }
+
+      function checkSphereCollisions(headPos: THREE.Vector3) {
+        // Eat dots (only on sphere)
+        for (const dot of dots) {
+          if (!dot.mesh.visible) continue;
+          if (headPos.distanceTo(dot.mesh.position) < eatDistance) {
+            dot.mesh.visible = false;
+            dotsEatenLocal += 1;
+            setDotsEaten(dotsEatenLocal);
+            // Grow slowly: +1 segment per dot
+            segmentCount = Math.min(segmentCount + 1, 220);
+            // Respawn quickly somewhere else.
+            setTimeout(() => respawnDot(dot), 180);
+          }
+        }
+
+        // Check barrier collisions
+        for (const barrier of barriers) {
+          if (barrier.curve && barrier.tubeRadius) {
+            // Sample points along the curve and find closest point
+            let minDistance = Infinity;
+            const samples = 30;
+            
+            for (let i = 0; i <= samples; i++) {
+              const t = i / samples;
+              const curvePoint = barrier.curve.getPoint(t);
+              const distance = headPos.distanceTo(curvePoint);
+              if (distance < minDistance) {
+                minDistance = distance;
+              }
+            }
+            
+            if (minDistance < barrier.tubeRadius + 4) {
+              console.log('Barrier collision! Distance:', minDistance, 'Barrier radius:', barrier.tubeRadius);
+              setCollisionType('barrier');
+              isGameOverRef.current = true;
+              setIsGameOver(true);
+              break;
+            }
+          }
+        }
+
+        // Check self-collision (only on sphere)
+        if (segmentCount > initialSegments + 5) {
+          const startCheck = 16;
+          const endCheck = Math.min(segmentCount * 2, segmentNormals.length);
+          
+          for (let i = startCheck; i < endCheck; i++) {
+            const segmentPos = segmentNormals[i].clone().multiplyScalar(snakeRadius);
+            const collisionDistance = 13;
+            if (headPos.distanceTo(segmentPos) < collisionDistance) {
+              console.log('Self-collision! Distance:', headPos.distanceTo(segmentPos), 'at segment index:', i, 'segmentCount:', segmentCount);
+              setCollisionType('self');
+              isGameOverRef.current = true;
+              setIsGameOver(true);
+              break;
+            }
           }
         }
       }
 
       // Camera follow
-      // Behind the snake along movement direction, and slightly above surface normal.
-      const back = headingTangent.clone().multiplyScalar(-R * 0.25);
-      const up = headNormal.clone().multiplyScalar(R * 0.15);
-      camera.position.copy(headPos).add(back).add(up);
-      // Keep the camera's "up" aligned to the local surface normal to avoid drift/tilt.
-      camera.up.copy(headNormal);
-      camera.lookAt(headPos);
+      if (worldState === 'sphere') {
+        // Behind the snake along movement direction, and slightly above surface normal.
+        const headPos = headMesh.position;
+        const back = headingTangent.clone().multiplyScalar(-R * 0.25 * cameraZoom);
+        const up = headNormal.clone().multiplyScalar(R * 0.15 * cameraZoom);
+        camera.position.copy(headPos).add(back).add(up);
+        // Keep the camera's "up" aligned to the local surface normal to avoid drift/tilt.
+        camera.up.copy(headNormal);
+        camera.lookAt(headPos);
+      } else if (worldState === 'void') {
+        // In void, camera follows behind snake in free space - much farther back
+        const headPos = headMesh.position;
+        const back = voidVelocity.clone().multiplyScalar(-300 * cameraZoom); // Increased from 150
+        const up = voidUpVector.clone().multiplyScalar(100 * cameraZoom); // Increased from 50
+        camera.position.copy(headPos).add(back).add(up);
+        camera.up.copy(voidUpVector);
+        camera.lookAt(headPos);
+      }
 
       // Subtle star drift for a bit of life
       stars.rotation.y += dt * 0.01;
@@ -536,12 +829,40 @@ export default function SphereSnakeGame() {
       {menuScreen === 'playing' && (
         <>
           <div className="pointer-events-none absolute right-4 top-4 rounded-lg bg-black/50 px-3 py-2 text-sm font-semibold text-white backdrop-blur">
-            Dots eaten: <span className="tabular-nums">{dotsEaten}</span>
+            Fruits eaten: <span className="tabular-nums">{dotsEaten}</span>
+            {dotsEaten >= portalUnlockThreshold && <div className="text-xs text-cyan-400 mt-1">✨ Portal unlocked!</div>}
           </div>
           <div className="pointer-events-none absolute left-4 top-4 rounded-lg bg-black/40 px-3 py-2 text-xs text-white/90 backdrop-blur">
             Controls: <span className="font-semibold">{controlType === 'keyboard' ? '↑ forward | ← / → steer' : 'L-Click forward | Move Mouse to steer'}</span> | <span className="font-semibold">P</span> to pause
           </div>
+          <div className="pointer-events-auto absolute bottom-4 right-4 rounded-lg bg-black/50 px-3 py-2 text-xs text-white/90 backdrop-blur">
+            <label className="flex items-center gap-2">
+              <span className="font-semibold">Camera Zoom:</span>
+              <input
+                type="range"
+                min="0.5"
+                max="2.0"
+                step="0.1"
+                value={cameraZoom}
+                onChange={(e) => setCameraZoom(parseFloat(e.target.value))}
+                className="w-24"
+              />
+              <span className="tabular-nums w-8">{cameraZoom.toFixed(1)}x</span>
+            </label>
+          </div>
         </>
+      )}
+
+      {/* Transition overlay */}
+      {isTransitioning && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-lg">
+          <div className="text-center">
+            <div className="text-5xl font-bold text-cyan-400 animate-pulse mb-4">
+              Traveling through the portal...
+            </div>
+            <div className="w-16 h-16 border-4 border-cyan-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          </div>
+        </div>
       )}
       
       {/* Game State Overlays - only show when playing */}
