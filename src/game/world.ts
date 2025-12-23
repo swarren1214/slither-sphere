@@ -69,19 +69,20 @@ export function createWorld(scene: THREE.Scene, sphereRadius: number) {
   const stars = new THREE.Points(starsGeo, starsMat);
   scene.add(stars);
 
-  // Globe grid with terrain and earth-tone colors
+  // Globe grid with terrain and interdimensional colors
   const noise2D = createNoise2D();
   const gridGeometry = new THREE.SphereGeometry(sphereRadius * 1.001, 512, 512);
   const positionAttribute = gridGeometry.attributes.position;
   const gridColors = new Float32Array(positionAttribute.count * 3);
   
-  // Terrain color palette
-  const deepGreen = new THREE.Color(0x1a4d2e);
-  const forestGreen = new THREE.Color(0x2d5a3d);
-  const grassGreen = new THREE.Color(0x4a7c59);
-  const lightGreen = new THREE.Color(0x6b9d7a);
-  const sandyBrown = new THREE.Color(0x8b7355);
-  const darkBrown = new THREE.Color(0x4a3728);
+  // Interdimensional color palette - vibrant and otherworldly
+  const deepPurple = new THREE.Color(0x4a0e78);
+  const magenta = new THREE.Color(0xb8148f);
+  const hotPink = new THREE.Color(0xff006e);
+  const cyan = new THREE.Color(0x00d9ff);
+  const electricBlue = new THREE.Color(0x0066ff);
+  const neonGreen = new THREE.Color(0x39ff14);
+  const cosmicPurple = new THREE.Color(0x7b2cbf);
   
   // Track min/max displacement for normalization
   const displacements: number[] = [];
@@ -107,14 +108,15 @@ export function createWorld(scene: THREE.Scene, sphereRadius: number) {
     const noise2 = noise2D(lon * scale2, lat * scale2) * 0.25;
     const noise3 = noise2D(lon * scale3, lat * scale3) * 0.125;
     
-    const displacement = (noise1 + noise2 + noise3) * sphereRadius * 0.005;
+    // Dramatically reduced displacement
+    const displacement = (noise1 + noise2 + noise3) * sphereRadius * 0.0008;
     displacements.push(displacement);
     
     vertex.normalize().multiplyScalar(sphereRadius * 1.001 + displacement);
     positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
   }
   
-  // Apply colors based on elevation
+  // Apply colors based on elevation - interdimensional gradient
   const minDisp = Math.min(...displacements);
   const maxDisp = Math.max(...displacements);
   const range = maxDisp - minDisp;
@@ -123,21 +125,24 @@ export function createWorld(scene: THREE.Scene, sphereRadius: number) {
     const normalizedHeight = (displacements[i] - minDisp) / range;
     
     let color: THREE.Color;
-    if (normalizedHeight < 0.3) {
-      // Low areas: dark brown to sandy brown
-      color = darkBrown.clone().lerp(sandyBrown, normalizedHeight / 0.3);
+    if (normalizedHeight < 0.15) {
+      // Deep purple to magenta
+      color = deepPurple.clone().lerp(magenta, normalizedHeight / 0.15);
+    } else if (normalizedHeight < 0.35) {
+      // Magenta to hot pink
+      color = magenta.clone().lerp(hotPink, (normalizedHeight - 0.15) / 0.2);
     } else if (normalizedHeight < 0.5) {
-      // Mid-low: sandy brown to deep green
-      color = sandyBrown.clone().lerp(deepGreen, (normalizedHeight - 0.3) / 0.2);
-    } else if (normalizedHeight < 0.7) {
-      // Mid: deep green to forest green
-      color = deepGreen.clone().lerp(forestGreen, (normalizedHeight - 0.5) / 0.2);
-    } else if (normalizedHeight < 0.85) {
-      // Mid-high: forest green to grass green
-      color = forestGreen.clone().lerp(grassGreen, (normalizedHeight - 0.7) / 0.15);
+      // Hot pink to cosmic purple
+      color = hotPink.clone().lerp(cosmicPurple, (normalizedHeight - 0.35) / 0.15);
+    } else if (normalizedHeight < 0.65) {
+      // Cosmic purple to electric blue
+      color = cosmicPurple.clone().lerp(electricBlue, (normalizedHeight - 0.5) / 0.15);
+    } else if (normalizedHeight < 0.8) {
+      // Electric blue to cyan
+      color = electricBlue.clone().lerp(cyan, (normalizedHeight - 0.65) / 0.15);
     } else {
-      // High areas: grass green to light green
-      color = grassGreen.clone().lerp(lightGreen, (normalizedHeight - 0.85) / 0.15);
+      // Cyan to neon green
+      color = cyan.clone().lerp(neonGreen, (normalizedHeight - 0.8) / 0.2);
     }
     
     gridColors[i * 3] = color.r;

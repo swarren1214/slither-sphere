@@ -8,6 +8,9 @@ export type Dot = {
 export type Barrier = {
   normal: THREE.Vector3;
   mesh: THREE.Mesh;
+  wallSegments?: THREE.Mesh[];
+  curve?: THREE.CatmullRomCurve3;
+  tubeRadius?: number;
 };
 
 export type MenuScreen = 'main' | 'playing' | 'settings' | 'store';
@@ -38,4 +41,7 @@ export interface GameConfig {
   barrierLift: number;
   snakeRadius: number;
   dotSurfaceRadius: number;
+  acceleration: number;
+  deceleration: number;
+  reverseSpeedMultiplier: number;
 }
