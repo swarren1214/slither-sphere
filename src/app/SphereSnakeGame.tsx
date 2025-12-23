@@ -690,10 +690,16 @@ export default function SphereSnakeGame() {
       {menuScreen === 'main' && (
         <div className="absolute inset-0 flex items-center justify-center bg-linear-to-b from-slate-900 to-black">
           <div className="text-center">
-            <h1 className="text-7xl font-bold text-white mb-3 tracking-tight">
-              <span className="bg-linear-to-r from-green-400 to-emerald-600 bg-clip-text text-transparent">SLITHER</span>
-              <span className="text-blue-400"> SPHERE</span>
-            </h1>
+            <div className="mx-auto mb-10 w-[280px] max-w-[70vw]">
+              <Image
+                src="/slither-sphere-logo.png"
+                alt="Slither Sphere logo"
+                width={512}
+                height={512}
+                priority
+                className="h-auto w-full select-none"
+              />
+            </div>
             <p className="text-white/60 text-lg mb-12">Navigate the sphere, avoid the barriers</p>
             <div className="flex flex-col gap-4 items-center">
               <button
