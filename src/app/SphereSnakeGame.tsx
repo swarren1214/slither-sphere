@@ -92,9 +92,16 @@ export default function SphereSnakeGame() {
     let headingTangent = new THREE.Vector3(1, 0, 0);
     headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
 
+    // Pre-space segments behind the head so snake appears complete from start
     const segmentNormals: THREE.Vector3[] = [];
-    for (let i = 0; i < initialSegments; i++) {
-      segmentNormals.push(headNormal.clone());
+    for (let i = 0; i < 220; i++) { // Create positions for all possible body segments
+      // Create segments trailing behind in the opposite direction
+      const trailNormal = headNormal.clone();
+      const backwardTangent = headingTangent.clone().negate();
+      const angleOffset = (i * segmentSpacing) / R;
+      const axis = new THREE.Vector3().crossVectors(headNormal, backwardTangent).normalize();
+      const rotatedNormal = rotateAroundAxis(trailNormal, axis, angleOffset).normalize();
+      segmentNormals.push(rotatedNormal);
     }
     let segmentCount = initialSegments;
     let distanceAccumulator = 0;
@@ -167,20 +174,34 @@ export default function SphereSnakeGame() {
       distanceAccumulator += moveSpeed * dt;
       while (distanceAccumulator >= segmentSpacing) {
         distanceAccumulator -= segmentSpacing;
-        segmentNormals.unshift(headNormal.clone());
-        if (segmentNormals.length > segmentCount) segmentNormals.pop();
+        // Shift all segment positions back by one
+        for (let i = segmentNormals.length - 1; i > 0; i--) {
+          segmentNormals[i].copy(segmentNormals[i - 1]);
+        }
+        // Set first position to current head
+        segmentNormals[0].copy(headNormal);
       }
 
       // Update snake meshes
       headMesh.position.copy(headNormal).multiplyScalar(snakeRadius);
       headMesh.lookAt(tmpVec.copy(headNormal).multiplyScalar(snakeRadius + 1));
 
+      // Interpolate body segments between stored positions for smooth movement
+      const alpha = distanceAccumulator / segmentSpacing; // 0..1
+      
       for (let i = 0; i < bodyMeshes.length; i++) {
         const m = bodyMeshes[i];
-        if (i < segmentNormals.length - 1) {
-          const n = segmentNormals[i + 1];
+        
+        if (i < segmentCount - 1) {
           m.visible = true;
-          m.position.copy(n).multiplyScalar(snakeRadius);
+          
+          // Smoothly interpolate between consecutive trail positions
+          const a = segmentNormals[i];
+          const b = segmentNormals[i + 1] ?? segmentNormals[i];
+          
+          // Linear interpolation + normalize for smooth movement
+          const interpolatedNormal = new THREE.Vector3().lerpVectors(a, b, alpha).normalize();
+          m.position.copy(interpolatedNormal).multiplyScalar(snakeRadius);
         } else {
           m.visible = false;
         }

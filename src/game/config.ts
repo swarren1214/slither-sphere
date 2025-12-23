@@ -8,7 +8,7 @@ export const DIFFICULTY_SETTINGS: Record<Difficulty, DifficultySettings> = {
 };
 
 export function getGameConfig(difficulty: Difficulty): GameConfig {
-  const R = 400; // sphere radius
+  const R = 800; // sphere radius (2x bigger)
   const diffSettings = DIFFICULTY_SETTINGS[difficulty];
   
   const baseSpeed = 200;
@@ -20,8 +20,8 @@ export function getGameConfig(difficulty: Difficulty): GameConfig {
     sphereRadius: R,
     moveSpeed,
     steerSpeed: 1.9,
-    segmentSpacing: 14,
-    initialSegments: 6,
+    segmentSpacing: 18,
+    initialSegments: 5,
     dotCount: 35,
     dotRadius: 4.4,
     eatDistance: 13,
