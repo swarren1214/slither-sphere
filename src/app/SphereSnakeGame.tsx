@@ -2,75 +2,77 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-
-type Dot = {
-  normal: THREE.Vector3; // unit vector from origin
-  mesh: THREE.Mesh;
-};
-
-function randomUnitVector(): THREE.Vector3 {
-  // Uniform on sphere.
-  const u = Math.random();
-  const v = Math.random();
-  const theta = 2 * Math.PI * u;
-  const phi = Math.acos(2 * v - 1);
-  const sinPhi = Math.sin(phi);
-  return new THREE.Vector3(
-    sinPhi * Math.cos(theta),
-    Math.cos(phi),
-    sinPhi * Math.sin(theta),
-  );
-}
-
-function rotateAroundAxis(v: THREE.Vector3, axisUnit: THREE.Vector3, angleRad: number) {
-  // Rodrigues' rotation formula
-  const cos = Math.cos(angleRad);
-  const sin = Math.sin(angleRad);
-  const cross = new THREE.Vector3().crossVectors(axisUnit, v);
-  const dot = axisUnit.dot(v);
-  return v
-    .clone()
-    .multiplyScalar(cos)
-    .add(cross.multiplyScalar(sin))
-    .add(axisUnit.clone().multiplyScalar(dot * (1 - cos)));
-}
+import { MenuScreen, ControlType, Difficulty } from "@/game/types";
+import { getGameConfig } from "@/game/config";
+import { rotateAroundAxis } from "@/game/utils";
+import { createWorld } from "@/game/world";
+import { createSnake } from "@/game/snake";
+import { createDots } from "@/game/dots";
+import { createBarriers } from "@/game/barriers";
+import { setupControls } from "@/game/controls";
 
 export default function SphereSnakeGame() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [dotsEaten, setDotsEaten] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
+  const [isGameOver, setIsGameOver] = useState(false);
+  const isGameOverRef = useRef(false);
+  const restartGameRef = useRef<(() => void) | null>(null);
+  const [menuScreen, setMenuScreen] = useState<MenuScreen>('main');
+  const startGameRef = useRef<(() => void) | null>(null);
+  const [controlType, setControlType] = useState<ControlType>('keyboard');
+  const controlTypeRef = useRef<ControlType>('keyboard');
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+
+  // Sync control type ref
+  useEffect(() => {
+    controlTypeRef.current = controlType;
+  }, [controlType]);
 
   useEffect(() => {
-    if (!mountRef.current) return;
+    if (!mountRef.current || menuScreen !== 'playing') return;
 
+    // Store cleanup refs at the top level
+    let raf = 0;
+    let ro: ResizeObserver | null = null;
+    let renderer: THREE.WebGLRenderer | null = null;
+    let scene: THREE.Scene | null = null;
+    let controls: ReturnType<typeof setupControls> | null = null;
+
+    const initGame = () => {
     // --- Config ---
-    const R = 20; // sphere radius
-    const moveSpeed = 10; // units/sec along surface arc-length
-    const steerSpeed = 1.9; // rad/sec (left/right)
-    const segmentSpacing = 0.7;
-    const initialSegments = 6;
-    const dotCount = 35;
-    const dotRadius = 0.22;
-    const eatDistance = 0.65; // world units
-    const snakeLift = 0.35; // lift snake slightly off surface to avoid z-fighting with the globe
-    const dotLift = 0.18; // lift dots slightly off surface as well
-    const snakeRadius = R + snakeLift;
-    const dotSurfaceRadius = R + dotLift;
+    const config = getGameConfig(difficulty);
+    const {
+      sphereRadius: R,
+      moveSpeed,
+      steerSpeed,
+      segmentSpacing,
+      initialSegments,
+      dotCount,
+      dotRadius,
+      eatDistance,
+      snakeRadius,
+      dotSurfaceRadius,
+      barrierCount,
+      barrierRadius,
+      barrierHeight,
+      barrierLift,
+    } = config;
 
     // --- Scene ---
-    const scene = new THREE.Scene();
+    scene = new THREE.Scene();
     scene.background = new THREE.Color(0x070a12);
 
-    const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 2000);
-    camera.position.set(0, R * 1.1, R * 2.2);
+    const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 20000);
+    camera.position.set(0, R * 0.15, R * 0.35);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 2));
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
     renderer.domElement.style.display = "block";
-    mountRef.current.appendChild(renderer.domElement);
+    mountRef.current!.appendChild(renderer.domElement);
 
     // Lighting
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
@@ -79,84 +81,15 @@ export default function SphereSnakeGame() {
     key.position.set(30, 40, 10);
     scene.add(key);
 
-    // Globe
-    const globe = new THREE.Mesh(
-      new THREE.SphereGeometry(R, 64, 64),
-      new THREE.MeshStandardMaterial({
-        color: 0x122045,
-        metalness: 0.05,
-        roughness: 0.9,
-        emissive: 0x02050e,
-        emissiveIntensity: 0.7,
-      }),
-    );
-    scene.add(globe);
+    // Create world
+    const { stars } = createWorld(scene, R);
 
-    // Stars (background)
-    const starCount = 2200;
-    const starInner = R * 8;
-    const starOuter = R * 22;
-    const starPositions = new Float32Array(starCount * 3);
-    const starColors = new Float32Array(starCount * 3);
-    const cA = new THREE.Color(0xffffff);
-    const cB = new THREE.Color(0xa7c7ff);
-    for (let i = 0; i < starCount; i++) {
-      // Random point in spherical shell
-      const dir = randomUnitVector();
-      const r = starInner + (starOuter - starInner) * Math.cbrt(Math.random());
-      starPositions[i * 3 + 0] = dir.x * r;
-      starPositions[i * 3 + 1] = dir.y * r;
-      starPositions[i * 3 + 2] = dir.z * r;
-
-      // Slight color variation (white -> pale blue)
-      const mix = Math.random() * 0.65;
-      const col = cA.clone().lerp(cB, mix);
-      starColors[i * 3 + 0] = col.r;
-      starColors[i * 3 + 1] = col.g;
-      starColors[i * 3 + 2] = col.b;
-    }
-    const starsGeo = new THREE.BufferGeometry();
-    starsGeo.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
-    starsGeo.setAttribute("color", new THREE.BufferAttribute(starColors, 3));
-    const starsMat = new THREE.PointsMaterial({
-      size: 0.18,
-      sizeAttenuation: true,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-    });
-    const stars = new THREE.Points(starsGeo, starsMat);
-    scene.add(stars);
-
-    const globeGrid = new THREE.Mesh(
-      new THREE.SphereGeometry(R * 1.001, 64, 64),
-      new THREE.MeshBasicMaterial({ color: 0x2a4eff, wireframe: true, transparent: true, opacity: 0.08 }),
-    );
-    scene.add(globeGrid);
-
-    // Snake
-    const snakeGroup = new THREE.Group();
-    scene.add(snakeGroup);
-
-    const headMat = new THREE.MeshStandardMaterial({ color: 0x6bff8a, roughness: 0.35, metalness: 0.1 });
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x19c15b, roughness: 0.55, metalness: 0.05 });
-    const segGeo = new THREE.SphereGeometry(0.35, 16, 16);
-
-    const headMesh = new THREE.Mesh(segGeo, headMat);
-    snakeGroup.add(headMesh);
-
-    const bodyMeshes: THREE.Mesh[] = [];
-    for (let i = 0; i < 220; i++) {
-      const m = new THREE.Mesh(segGeo, bodyMat);
-      m.visible = false;
-      snakeGroup.add(m);
-      bodyMeshes.push(m);
-    }
+    // Create snake
+    const { headMesh, bodyMeshes } = createSnake(scene);
 
     // Snake state on the sphere
-    let headNormal = new THREE.Vector3(0, 0, 1); // unit vector
-    let headingTangent = new THREE.Vector3(1, 0, 0); // unit tangent at headNormal
+    let headNormal = new THREE.Vector3(0, 0, 1);
+    let headingTangent = new THREE.Vector3(1, 0, 0);
     headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
 
     const segmentNormals: THREE.Vector3[] = [];
@@ -166,69 +99,21 @@ export default function SphereSnakeGame() {
     let segmentCount = initialSegments;
     let distanceAccumulator = 0;
 
-    // Dots
-    const dots: Dot[] = [];
-    const dotGeo = new THREE.SphereGeometry(dotRadius, 14, 14);
-    const dotMat = new THREE.MeshStandardMaterial({
-      color: 0xffd34d,
-      emissive: 0xffcc3a,
-      emissiveIntensity: 0.85,
-      roughness: 0.35,
-      metalness: 0.05,
-    });
+    // Create dots
+    const { dots, respawnDot } = createDots(scene, dotCount, dotRadius, dotSurfaceRadius, headNormal);
 
-    function respawnDot(dot: Dot) {
-      // Avoid spawning right under the head.
-      for (let tries = 0; tries < 40; tries++) {
-        const n = randomUnitVector();
-        if (n.dot(headNormal) < 0.985) {
-          dot.normal.copy(n);
-          dot.mesh.position.copy(n).multiplyScalar(dotSurfaceRadius);
-          dot.mesh.visible = true;
-          return;
-        }
-      }
-      dot.normal.copy(randomUnitVector());
-      dot.mesh.position.copy(dot.normal).multiplyScalar(dotSurfaceRadius);
-      dot.mesh.visible = true;
-    }
+    // Create barriers
+    const { barriers } = createBarriers(scene, barrierCount, barrierRadius, barrierHeight, R, barrierLift);
 
-    for (let i = 0; i < dotCount; i++) {
-      const mesh = new THREE.Mesh(dotGeo, dotMat);
-      scene.add(mesh);
-      const dot: Dot = { normal: randomUnitVector(), mesh };
-      dots.push(dot);
-      respawnDot(dot);
-    }
-
-    // Input
-    let steer = 0; // -1 left, +1 right
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "ArrowLeft") {
-        // Left should turn counter-clockwise (screen space expectation)
-        steer = 1;
-        e.preventDefault();
-      } else if (e.key === "ArrowRight") {
-        // Right should turn clockwise
-        steer = -1;
-        e.preventDefault();
-      } else if (e.key === "p" || e.key === "P") {
-        isPausedRef.current = !isPausedRef.current;
-        setIsPaused(isPausedRef.current);
-        e.preventDefault();
-      }
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "ArrowLeft" && steer === 1) {
-        steer = 0;
-        e.preventDefault();
-      } else if (e.key === "ArrowRight" && steer === -1) {
-        steer = 0;
-        e.preventDefault();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown, { passive: false });
-    window.addEventListener("keyup", onKeyUp, { passive: false });
+    // Setup controls
+    controls = setupControls(
+      controlTypeRef,
+      mountRef,
+      isPausedRef,
+      isGameOverRef,
+      setIsPaused,
+      () => restartGameRef.current?.()
+    );
 
     // Resize
     const resize = () => {
@@ -236,16 +121,15 @@ export default function SphereSnakeGame() {
       const { clientWidth, clientHeight } = mountRef.current;
       // Important: keep canvas CSS size in sync with drawing buffer size so the
       // camera center maps to the actual visible center of the canvas.
-      renderer.setSize(clientWidth, clientHeight, true);
+      renderer!.setSize(clientWidth, clientHeight, true);
       camera.aspect = clientWidth / Math.max(1, clientHeight);
       camera.updateProjectionMatrix();
     };
-    const ro = new ResizeObserver(resize);
-    ro.observe(mountRef.current);
+    ro = new ResizeObserver(resize);
+    ro.observe(mountRef.current!);
     resize();
 
     // Render loop
-    let raf = 0;
     let lastT = performance.now();
     let dotsEatenLocal = 0;
 
@@ -257,13 +141,14 @@ export default function SphereSnakeGame() {
       const dt = Math.min(0.033, (t - lastT) / 1000);
       lastT = t;
 
-      // Skip game logic if paused, but still render
-      if (isPausedRef.current) {
-        renderer.render(scene, camera);
+      // Skip game logic if paused or game over, but still render
+      if (isPausedRef.current || isGameOverRef.current) {
+        renderer!.render(scene!, camera);
         return;
       }
 
       // Steering: rotate heading tangent around the local normal
+      const steer = controls!.getSteer();
       if (steer !== 0) {
         headingTangent = rotateAroundAxis(headingTangent, headNormal, steer * steerSpeed * dt).normalize();
         // Re-project tangent (numerical drift)
@@ -316,10 +201,41 @@ export default function SphereSnakeGame() {
         }
       }
 
+      // Check barrier collisions
+      for (const barrier of barriers) {
+        const barrierPos = barrier.mesh.position;
+        if (headPos.distanceTo(barrierPos) < barrierRadius + 7) { // 7 is snake segment radius
+          // GAME OVER!
+          isGameOverRef.current = true;
+          setIsGameOver(true);
+          break;
+        }
+      }
+
+      // Check self-collision (snake running into itself)
+      // Only check if snake has grown beyond initial segments
+      // Start checking from a safe distance to avoid neck collision
+      if (segmentCount > initialSegments + 3) {
+        for (let i = 8; i < segmentNormals.length - 1; i++) {
+          if (i >= bodyMeshes.length) break;
+          const bodySegment = bodyMeshes[i];
+          if (bodySegment.visible) {
+            const segmentPos = bodySegment.position;
+            const collisionDistance = 14; // Two segment radii (7 + 7)
+            if (headPos.distanceTo(segmentPos) < collisionDistance) {
+              // GAME OVER!
+              isGameOverRef.current = true;
+              setIsGameOver(true);
+              break;
+            }
+          }
+        }
+      }
+
       // Camera follow
       // Behind the snake along movement direction, and slightly above surface normal.
-      const back = headingTangent.clone().multiplyScalar(-R * 1.6);
-      const up = headNormal.clone().multiplyScalar(R * 0.9);
+      const back = headingTangent.clone().multiplyScalar(-R * 0.25);
+      const up = headNormal.clone().multiplyScalar(R * 0.15);
       camera.position.copy(headPos).add(back).add(up);
       // Keep the camera's "up" aligned to the local surface normal to avoid drift/tilt.
       camera.up.copy(headNormal);
@@ -329,45 +245,54 @@ export default function SphereSnakeGame() {
       stars.rotation.y += dt * 0.01;
       stars.rotation.x += dt * 0.004;
 
-      renderer.render(scene, camera);
+      renderer!.render(scene!, camera);
     };
 
     raf = requestAnimationFrame(tick);
+    }; // end initGame
 
-    return () => {
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
+    const cleanup = () => {
+      if (raf) cancelAnimationFrame(raf);
+      if (ro) ro.disconnect();
+      if (controls) controls.cleanup();
 
-      // Dispose
-      renderer.dispose();
-      segGeo.dispose();
-      dotGeo.dispose();
-      starsGeo.dispose();
-      starsMat.dispose();
-      (globe.geometry as THREE.BufferGeometry).dispose();
-      (globe.material as THREE.Material).dispose();
-      (globeGrid.geometry as THREE.BufferGeometry).dispose();
-      (globeGrid.material as THREE.Material).dispose();
-      headMat.dispose();
-      bodyMat.dispose();
-      dotMat.dispose();
-
-      for (const dot of dots) {
-        scene.remove(dot.mesh);
+      // Dispose renderer and clear scene
+      if (renderer) {
+        renderer.dispose();
+        if (renderer.domElement.parentElement) {
+          renderer.domElement.parentElement.removeChild(renderer.domElement);
+        }
       }
-      scene.remove(stars);
-      scene.remove(globe);
-      scene.remove(globeGrid);
-      scene.remove(snakeGroup);
-      scene.clear();
-
-      if (renderer.domElement.parentElement) {
-        renderer.domElement.parentElement.removeChild(renderer.domElement);
+      
+      if (scene) {
+        scene.clear();
       }
     };
-  }, []);
+
+    const restart = () => {
+      cleanup();
+      isGameOverRef.current = false;
+      setIsGameOver(false);
+      isPausedRef.current = false;
+      setIsPaused(false);
+      setDotsEaten(0);
+      // Clear the mount element
+      if (mountRef.current) {
+        mountRef.current.innerHTML = '';
+      }
+      initGame();
+    };
+
+    const startGame = () => {
+      setMenuScreen('playing');
+    };
+
+    restartGameRef.current = restart;
+    startGameRef.current = startGame;
+    initGame();
+
+    return cleanup;
+  }, [menuScreen, difficulty]);
 
   return (
     <div className="relative h-dvh w-dvw overflow-hidden bg-black">
@@ -377,17 +302,188 @@ export default function SphereSnakeGame() {
         aria-label="3D snake game canvas"
         role="application"
       />
-      <div className="pointer-events-none absolute right-4 top-4 rounded-lg bg-black/50 px-3 py-2 text-sm font-semibold text-white backdrop-blur">
-        Dots eaten: <span className="tabular-nums">{dotsEaten}</span>
-      </div>
-      <div className="pointer-events-none absolute left-4 top-4 rounded-lg bg-black/40 px-3 py-2 text-xs text-white/90 backdrop-blur">
-        Controls: <span className="font-semibold">←</span> / <span className="font-semibold">→</span> | <span className="font-semibold">P</span> to pause
-      </div>
-      {isPaused && (
+      
+      {/* Main Menu */}
+      {menuScreen === 'main' && (
+        <div className="absolute inset-0 flex items-center justify-center bg-linear-to-b from-slate-900 to-black">
+          <div className="text-center">
+            <h1 className="text-7xl font-bold text-white mb-3 tracking-tight">
+              <span className="bg-linear-to-r from-green-400 to-emerald-600 bg-clip-text text-transparent">SLITHER</span>
+              <span className="text-blue-400"> SPHERE</span>
+            </h1>
+            <p className="text-white/60 text-lg mb-12">Navigate the sphere, avoid the barriers</p>
+            <div className="flex flex-col gap-4 items-center">
+              <button
+                onClick={() => setMenuScreen('playing')}
+                className="w-64 px-8 py-4 bg-linear-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white text-xl font-bold rounded-xl transition-all transform hover:scale-105 shadow-lg shadow-green-500/50"
+              >
+                PLAY
+              </button>
+              <button
+                onClick={() => setMenuScreen('settings')}
+                className="w-64 px-8 py-4 bg-slate-700 hover:bg-slate-600 text-white text-xl font-bold rounded-xl transition-all transform hover:scale-105"
+              >
+                SETTINGS
+              </button>
+              <button
+                onClick={() => setMenuScreen('store')}
+                className="w-64 px-8 py-4 bg-slate-700 hover:bg-slate-600 text-white text-xl font-bold rounded-xl transition-all transform hover:scale-105"
+              >
+                STORE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Screen */}
+      {menuScreen === 'settings' && (
+        <div className="absolute inset-0 flex items-center justify-center bg-linear-to-b from-slate-900 to-black">
+          <div className="text-center max-w-2xl">
+            <h2 className="text-5xl font-bold text-white mb-8">SETTINGS</h2>
+            <div className="bg-slate-800/50 rounded-xl p-8 backdrop-blur-sm mb-8">
+              <div className="mb-8 pb-8 border-b border-white/10">
+                <h3 className="text-white text-xl font-semibold mb-4">Difficulty</h3>
+                <div className="flex gap-3 justify-center">
+                  <button
+                    onClick={() => setDifficulty('easy')}
+                    className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                      difficulty === 'easy'
+                        ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/50'
+                        : 'bg-slate-700 text-white/70 hover:bg-slate-600'
+                    }`}
+                  >
+                    😊 Easy
+                  </button>
+                  <button
+                    onClick={() => setDifficulty('medium')}
+                    className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                      difficulty === 'medium'
+                        ? 'bg-yellow-600 text-white shadow-lg shadow-yellow-500/50'
+                        : 'bg-slate-700 text-white/70 hover:bg-slate-600'
+                    }`}
+                  >
+                    😐 Medium
+                  </button>
+                  <button
+                    onClick={() => setDifficulty('hard')}
+                    className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                      difficulty === 'hard'
+                        ? 'bg-red-600 text-white shadow-lg shadow-red-500/50'
+                        : 'bg-slate-700 text-white/70 hover:bg-slate-600'
+                    }`}
+                  >
+                    😈 Hard
+                  </button>
+                </div>
+                <p className="text-white/50 text-sm mt-4">
+                  {difficulty === 'easy' && 'Slower speed (75%), fewer barriers'}
+                  {difficulty === 'medium' && 'Normal speed, standard barriers'}
+                  {difficulty === 'hard' && 'Faster speed (125%), more barriers'}
+                </p>
+              </div>
+              <div className="mb-6">
+                <h3 className="text-white text-xl font-semibold mb-4">Control Type</h3>
+                <div className="flex gap-4 justify-center">
+                  <button
+                    onClick={() => setControlType('keyboard')}
+                    className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                      controlType === 'keyboard'
+                        ? 'bg-green-600 text-white shadow-lg shadow-green-500/50'
+                        : 'bg-slate-700 text-white/70 hover:bg-slate-600'
+                    }`}
+                  >
+                    ⌨️ Keyboard
+                  </button>
+                  <button
+                    onClick={() => setControlType('mouse')}
+                    className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                      controlType === 'mouse'
+                        ? 'bg-green-600 text-white shadow-lg shadow-green-500/50'
+                        : 'bg-slate-700 text-white/70 hover:bg-slate-600'
+                    }`}
+                  >
+                    🖱️ Mouse
+                  </button>
+                </div>
+                <p className="text-white/50 text-sm mt-4">
+                  {controlType === 'keyboard' 
+                    ? 'Use arrow keys ← → to steer'
+                    : 'Move your mouse left/right to steer'}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setMenuScreen('main')}
+              className="px-8 py-3 bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold rounded-xl transition-all"
+            >
+              BACK TO MENU
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Store Screen */}
+      {menuScreen === 'store' && (
+        <div className="absolute inset-0 flex items-center justify-center bg-linear-to-b from-slate-900 to-black">
+          <div className="text-center max-w-2xl">
+            <h2 className="text-5xl font-bold text-white mb-8">STORE</h2>
+            <div className="bg-slate-800/50 rounded-xl p-8 backdrop-blur-sm mb-8">
+              <p className="text-white/60 text-lg">Store items coming soon...</p>
+              <p className="text-white/40 text-sm mt-4">Unlock new skins, power-ups, and more!</p>
+            </div>
+            <button
+              onClick={() => setMenuScreen('main')}
+              className="px-8 py-3 bg-slate-700 hover:bg-slate-600 text-white text-lg font-bold rounded-xl transition-all"
+            >
+              BACK TO MENU
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Game HUD - only show when playing */}
+      {menuScreen === 'playing' && (
+        <>
+          <div className="pointer-events-none absolute right-4 top-4 rounded-lg bg-black/50 px-3 py-2 text-sm font-semibold text-white backdrop-blur">
+            Dots eaten: <span className="tabular-nums">{dotsEaten}</span>
+          </div>
+          <div className="pointer-events-none absolute left-4 top-4 rounded-lg bg-black/40 px-3 py-2 text-xs text-white/90 backdrop-blur">
+            Controls: <span className="font-semibold">{controlType === 'keyboard' ? '← / →' : 'Move Mouse'}</span> | <span className="font-semibold">P</span> to pause
+          </div>
+        </>
+      )}
+      
+      {/* Game State Overlays - only show when playing */}
+      {menuScreen === 'playing' && isPaused && !isGameOver && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="rounded-xl bg-black/70 px-8 py-6 text-center backdrop-blur-sm">
             <div className="text-4xl font-bold text-white">PAUSED</div>
             <div className="mt-2 text-sm text-white/80">Press P to continue</div>
+            <div className="mt-2 text-xs text-white/60">Press R to restart</div>
+          </div>
+        </div>
+      )}
+      {menuScreen === 'playing' && isGameOver && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="rounded-xl bg-red-900/80 px-12 py-8 text-center backdrop-blur-sm border-2 border-red-500">
+            <div className="text-5xl font-bold text-white mb-4">GAME OVER</div>
+            <div className="text-2xl text-white/90 mb-2">You hit a barrier!</div>
+            <div className="text-xl text-white/80 mb-6">Final Score: <span className="font-bold tabular-nums">{dotsEaten}</span></div>
+            <div className="flex gap-4 justify-center mt-6">
+              <button
+                onClick={() => restartGameRef.current?.()}
+                className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg transition-all"
+              >
+                RESTART (R)
+              </button>
+              <button
+                onClick={() => setMenuScreen('main')}
+                className="px-6 py-3 bg-slate-600 hover:bg-slate-700 text-white font-bold rounded-lg transition-all"
+              >
+                MAIN MENU
+              </button>
+            </div>
           </div>
         </div>
       )}
