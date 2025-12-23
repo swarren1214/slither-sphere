@@ -43,5 +43,4 @@ export interface GameConfig {
   dotSurfaceRadius: number;
   acceleration: number;
   deceleration: number;
-  reverseSpeedMultiplier: number;
 }

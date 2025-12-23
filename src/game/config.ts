@@ -35,6 +35,5 @@ export function getGameConfig(difficulty: Difficulty): GameConfig {
     dotSurfaceRadius: R + dotLift,
     acceleration: 300, // Speed units per second squared
     deceleration: 250, // Speed units per second squared
-    reverseSpeedMultiplier: 0.25, // 25% speed in reverse
   };
 }

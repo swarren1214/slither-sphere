@@ -61,7 +61,6 @@ export default function SphereSnakeGame() {
       barrierLift,
       acceleration,
       deceleration,
-      reverseSpeedMultiplier,
     } = config;
 
     // --- Scene ---
@@ -174,13 +173,7 @@ export default function SphereSnakeGame() {
       const forwardInput = controls!.getForward();
       
       // Calculate target speed based on input
-      let targetSpeed = 0;
-      if (forwardInput === 1) {
-        targetSpeed = moveSpeed; // Forward at full speed
-      } else if (forwardInput === -1) {
-        targetSpeed = -moveSpeed * reverseSpeedMultiplier; // Reverse at 25% speed
-      }
-      // else targetSpeed stays 0 (coasting to a stop)
+      const targetSpeed = forwardInput === 1 ? moveSpeed : 0;
 
       // Apply acceleration/deceleration with inertia
       if (currentSpeed < targetSpeed) {
@@ -505,8 +498,8 @@ export default function SphereSnakeGame() {
                 </div>
                 <p className="text-white/50 text-sm mt-4">
                   {controlType === 'keyboard' 
-                    ? 'Use ↑ to go forward, ↓ to reverse, ← → to steer'
-                    : 'Hold left-click to go forward, right-click to reverse, move mouse to steer'}
+                    ? 'Use ↑ to go forward, ← → to steer'
+                    : 'Hold left-click to go forward, move mouse to steer'}
                 </p>
               </div>
             </div>
@@ -546,7 +539,7 @@ export default function SphereSnakeGame() {
             Dots eaten: <span className="tabular-nums">{dotsEaten}</span>
           </div>
           <div className="pointer-events-none absolute left-4 top-4 rounded-lg bg-black/40 px-3 py-2 text-xs text-white/90 backdrop-blur">
-            Controls: <span className="font-semibold">{controlType === 'keyboard' ? '↑ forward | ↓ reverse | ← / → steer' : 'L-Click forward | R-Click reverse | Move Mouse to steer'}</span> | <span className="font-semibold">P</span> to pause
+            Controls: <span className="font-semibold">{controlType === 'keyboard' ? '↑ forward | ← / → steer' : 'L-Click forward | Move Mouse to steer'}</span> | <span className="font-semibold">P</span> to pause
           </div>
         </>
       )}
