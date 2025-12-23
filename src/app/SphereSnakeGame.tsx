@@ -38,6 +38,8 @@ function rotateAroundAxis(v: THREE.Vector3, axisUnit: THREE.Vector3, angleRad: n
 export default function SphereSnakeGame() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [dotsEaten, setDotsEaten] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(false);
 
   useEffect(() => {
     if (!mountRef.current) return;
@@ -210,6 +212,10 @@ export default function SphereSnakeGame() {
         // Right should turn clockwise
         steer = -1;
         e.preventDefault();
+      } else if (e.key === "p" || e.key === "P") {
+        isPausedRef.current = !isPausedRef.current;
+        setIsPaused(isPausedRef.current);
+        e.preventDefault();
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -250,6 +256,12 @@ export default function SphereSnakeGame() {
       raf = requestAnimationFrame(tick);
       const dt = Math.min(0.033, (t - lastT) / 1000);
       lastT = t;
+
+      // Skip game logic if paused, but still render
+      if (isPausedRef.current) {
+        renderer.render(scene, camera);
+        return;
+      }
 
       // Steering: rotate heading tangent around the local normal
       if (steer !== 0) {
@@ -369,8 +381,16 @@ export default function SphereSnakeGame() {
         Dots eaten: <span className="tabular-nums">{dotsEaten}</span>
       </div>
       <div className="pointer-events-none absolute left-4 top-4 rounded-lg bg-black/40 px-3 py-2 text-xs text-white/90 backdrop-blur">
-        Controls: <span className="font-semibold">←</span> / <span className="font-semibold">→</span>
+        Controls: <span className="font-semibold">←</span> / <span className="font-semibold">→</span> | <span className="font-semibold">P</span> to pause
       </div>
+      {isPaused && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="rounded-xl bg-black/70 px-8 py-6 text-center backdrop-blur-sm">
+            <div className="text-4xl font-bold text-white">PAUSED</div>
+            <div className="mt-2 text-sm text-white/80">Press P to continue</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
