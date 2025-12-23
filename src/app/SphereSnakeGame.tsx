@@ -380,9 +380,12 @@ export default function SphereSnakeGame() {
           }
         }
 
-        // Update snake position in void
-        headMesh.position.copy(voidPosition);
-        const lookTarget = voidPosition.clone().add(voidVelocity);
+        // Update snake position in void with wave motion
+        // Apply the same wave as the first body segment to keep head connected
+        const headWaveOffset = calculateVoidWaveOffset(0, t, voidVelocity, voidUpVector);
+        const adjustedHeadPos = voidPosition.clone().add(headWaveOffset);
+        headMesh.position.copy(adjustedHeadPos);
+        const lookTarget = adjustedHeadPos.clone().add(voidVelocity);
         headMesh.lookAt(lookTarget);
 
         updateSnakeBody();
@@ -398,6 +401,29 @@ export default function SphereSnakeGame() {
         // No collision detection in void!
       }
 
+      // Calculate smooth wave offset for void movement
+      function calculateVoidWaveOffset(segmentIndex: number, time: number, velocity: THREE.Vector3, up: THREE.Vector3): THREE.Vector3 {
+        // Smoother, more subtle wave parameters
+        const waveFrequency = 0.15; // Fewer waves = smoother
+        const waveAmplitude = 3; // Much more subtle movement
+        const waveSpeed = 0.0008; // Slower = more graceful
+        
+        // Primary horizontal wave
+        const phase = segmentIndex * waveFrequency + time * waveSpeed;
+        const waveOffset = Math.sin(phase) * waveAmplitude;
+        
+        // Apply wave perpendicular to velocity direction
+        const rightVector = new THREE.Vector3().crossVectors(velocity, up).normalize();
+        const waveVector = rightVector.multiplyScalar(waveOffset);
+        
+        // Very subtle vertical wave for flowing motion
+        const verticalPhase = segmentIndex * waveFrequency * 0.5 + time * waveSpeed * 1.2;
+        const verticalOffset = Math.sin(verticalPhase) * waveAmplitude * 0.4;
+        const verticalVector = up.clone().multiplyScalar(verticalOffset);
+        
+        return waveVector.add(verticalVector);
+      }
+
       function updateSnakeBody() {
         // Build smooth tube path using recent positions
         const tubePathPoints: THREE.Vector3[] = [];
@@ -408,28 +434,10 @@ export default function SphereSnakeGame() {
           if (worldState === 'sphere') {
             tubePathPoints.push(segmentNormals[i].clone().multiplyScalar(snakeRadius));
           } else {
-            // In void mode, add wave effect like a Chinese dragon
+            // In void mode, add smooth wave effect
             const basePos = segmentNormals[i].clone();
-            
-            // Create wave motion
-            const waveFrequency = 0.3; // How many waves along the body
-            const waveAmplitude = 8; // How far the wave moves (increased for more dramatic effect)
-            const waveSpeed = 0.002; // How fast the wave travels
-            
-            // Calculate wave offset based on segment index and time
-            const phase = i * waveFrequency + t * waveSpeed;
-            const waveOffset = Math.sin(phase) * waveAmplitude;
-            
-            // Apply wave perpendicular to velocity direction
-            const rightVector = new THREE.Vector3().crossVectors(voidVelocity, voidUpVector).normalize();
-            const waveVector = rightVector.multiplyScalar(waveOffset);
-            
-            // Also add a secondary vertical wave for more dragon-like motion
-            const verticalPhase = i * waveFrequency * 0.7 + t * waveSpeed * 0.8;
-            const verticalOffset = Math.sin(verticalPhase) * waveAmplitude * 0.6;
-            const verticalVector = voidUpVector.clone().multiplyScalar(verticalOffset);
-            
-            tubePathPoints.push(basePos.add(waveVector).add(verticalVector));
+            const waveOffset = calculateVoidWaveOffset(i, t, voidVelocity, voidUpVector);
+            tubePathPoints.push(basePos.add(waveOffset));
           }
         }
         
