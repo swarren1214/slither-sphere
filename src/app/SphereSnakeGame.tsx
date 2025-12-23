@@ -18,6 +18,7 @@ export default function SphereSnakeGame() {
   const isPausedRef = useRef(false);
   const [isGameOver, setIsGameOver] = useState(false);
   const isGameOverRef = useRef(false);
+  const [collisionType, setCollisionType] = useState<'barrier' | 'self'>('barrier');
   const restartGameRef = useRef<(() => void) | null>(null);
   const [menuScreen, setMenuScreen] = useState<MenuScreen>('main');
   const startGameRef = useRef<(() => void) | null>(null);
@@ -58,6 +59,9 @@ export default function SphereSnakeGame() {
       barrierRadius,
       barrierHeight,
       barrierLift,
+      acceleration,
+      deceleration,
+      reverseSpeedMultiplier,
     } = config;
 
     // --- Scene ---
@@ -84,8 +88,8 @@ export default function SphereSnakeGame() {
     // Create world
     const { stars } = createWorld(scene, R);
 
-    // Create snake
-    const { headMesh, bodyMeshes } = createSnake(scene);
+    // Create snake with tube body
+    const { headMesh, tubeMesh, tailCapMesh, tubeRadius, tubularSegments, radialSegments, bodyMat } = createSnake(scene, R);
 
     // Snake state on the sphere
     let headNormal = new THREE.Vector3(0, 0, 1);
@@ -94,7 +98,8 @@ export default function SphereSnakeGame() {
 
     // Pre-space segments behind the head so snake appears complete from start
     const segmentNormals: THREE.Vector3[] = [];
-    for (let i = 0; i < 220; i++) { // Create positions for all possible body segments
+    // Only create initial segments, not all possible segments
+    for (let i = 0; i < initialSegments * 3; i++) {
       // Create segments trailing behind in the opposite direction
       const trailNormal = headNormal.clone();
       const backwardTangent = headingTangent.clone().negate();
@@ -104,7 +109,6 @@ export default function SphereSnakeGame() {
       segmentNormals.push(rotatedNormal);
     }
     let segmentCount = initialSegments;
-    let distanceAccumulator = 0;
 
     // Create dots
     const { dots, respawnDot } = createDots(scene, dotCount, dotRadius, dotSurfaceRadius, headNormal);
@@ -139,6 +143,9 @@ export default function SphereSnakeGame() {
     // Render loop
     let lastT = performance.now();
     let dotsEatenLocal = 0;
+    let currentSpeed = 0; // Current actual speed (starts at 0)
+    let distanceSinceLastSegment = 0; // Track distance for adding body segments
+    const segmentAddThreshold = 6; // Add a segment every N units of travel (increased for smoother body)
 
     const tmpAxis = new THREE.Vector3();
     const tmpVec = new THREE.Vector3();
@@ -148,10 +155,40 @@ export default function SphereSnakeGame() {
       const dt = Math.min(0.033, (t - lastT) / 1000);
       lastT = t;
 
+      // Animate barrier glow (pulsing red)
+      const pulseIntensity = 0.3 + Math.sin(t * 0.003) * 0.3; // Oscillate between 0 and 0.6
+      barriers.forEach(barrier => {
+        barrier.wallSegments?.forEach(segment => {
+          const material = segment.material as THREE.MeshStandardMaterial;
+          material.emissiveIntensity = pulseIntensity;
+        });
+      });
+
       // Skip game logic if paused or game over, but still render
       if (isPausedRef.current || isGameOverRef.current) {
         renderer!.render(scene!, camera);
         return;
+      }
+
+      // Get forward input
+      const forwardInput = controls!.getForward();
+      
+      // Calculate target speed based on input
+      let targetSpeed = 0;
+      if (forwardInput === 1) {
+        targetSpeed = moveSpeed; // Forward at full speed
+      } else if (forwardInput === -1) {
+        targetSpeed = -moveSpeed * reverseSpeedMultiplier; // Reverse at 25% speed
+      }
+      // else targetSpeed stays 0 (coasting to a stop)
+
+      // Apply acceleration/deceleration with inertia
+      if (currentSpeed < targetSpeed) {
+        // Accelerating
+        currentSpeed = Math.min(currentSpeed + acceleration * dt, targetSpeed);
+      } else if (currentSpeed > targetSpeed) {
+        // Decelerating
+        currentSpeed = Math.max(currentSpeed - deceleration * dt, targetSpeed);
       }
 
       // Steering: rotate heading tangent around the local normal
@@ -163,48 +200,66 @@ export default function SphereSnakeGame() {
       }
 
       // Move: rotate headNormal along the great-circle defined by tangent direction.
-      // Axis is perpendicular to both normal and heading (defines plane of travel).
-      tmpAxis.crossVectors(headNormal, headingTangent).normalize();
-      const angle = (moveSpeed / R) * dt;
+      // Only move if speed is non-zero
+      if (Math.abs(currentSpeed) > 0.1) {
+        // Axis is perpendicular to both normal and heading (defines plane of travel).
+        tmpAxis.crossVectors(headNormal, headingTangent).normalize();
+        const angle = (currentSpeed / R) * dt;
 
-      headNormal = rotateAroundAxis(headNormal, tmpAxis, angle).normalize();
-      headingTangent = rotateAroundAxis(headingTangent, tmpAxis, angle).normalize();
-      headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
+        headNormal = rotateAroundAxis(headNormal, tmpAxis, angle).normalize();
+        headingTangent = rotateAroundAxis(headingTangent, tmpAxis, angle).normalize();
+        headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
 
-      distanceAccumulator += moveSpeed * dt;
-      while (distanceAccumulator >= segmentSpacing) {
-        distanceAccumulator -= segmentSpacing;
-        // Shift all segment positions back by one
-        for (let i = segmentNormals.length - 1; i > 0; i--) {
-          segmentNormals[i].copy(segmentNormals[i - 1]);
+        const distanceMoved = Math.abs(currentSpeed) * dt;
+        distanceSinceLastSegment += distanceMoved;
+        
+        // Only add new segment positions when we've traveled enough distance
+        while (distanceSinceLastSegment >= segmentAddThreshold) {
+          segmentNormals.unshift(headNormal.clone());
+          distanceSinceLastSegment -= segmentAddThreshold;
+          
+          // Keep only enough positions for the snake length plus small buffer
+          const maxPositions = Math.min(segmentCount * 2 + 5, 440);
+          while (segmentNormals.length > maxPositions) {
+            segmentNormals.pop();
+          }
         }
-        // Set first position to current head
-        segmentNormals[0].copy(headNormal);
       }
 
       // Update snake meshes
       headMesh.position.copy(headNormal).multiplyScalar(snakeRadius);
       headMesh.lookAt(tmpVec.copy(headNormal).multiplyScalar(snakeRadius + 1));
 
-      // Interpolate body segments between stored positions for smooth movement
-      const alpha = distanceAccumulator / segmentSpacing; // 0..1
+      // Build smooth tube path using recent positions
+      const tubePathPoints: THREE.Vector3[] = [];
+      const pointsToUse = Math.min(segmentCount * 2, segmentNormals.length);
       
-      for (let i = 0; i < bodyMeshes.length; i++) {
-        const m = bodyMeshes[i];
+      // Sample evenly across the available positions
+      for (let i = 0; i < pointsToUse; i++) {
+        tubePathPoints.push(segmentNormals[i].clone().multiplyScalar(snakeRadius));
+      }
+      
+      // Only update tube if we have enough points
+      if (tubePathPoints.length >= 2) {
+        const curve = new THREE.CatmullRomCurve3(tubePathPoints);
+        const newTubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, tubeRadius, radialSegments, false);
         
-        if (i < segmentCount - 1) {
-          m.visible = true;
-          
-          // Smoothly interpolate between consecutive trail positions
-          const a = segmentNormals[i];
-          const b = segmentNormals[i + 1] ?? segmentNormals[i];
-          
-          // Linear interpolation + normalize for smooth movement
-          const interpolatedNormal = new THREE.Vector3().lerpVectors(a, b, alpha).normalize();
-          m.position.copy(interpolatedNormal).multiplyScalar(snakeRadius);
-        } else {
-          m.visible = false;
-        }
+        tubeMesh.geometry.dispose();
+        tubeMesh.geometry = newTubeGeometry;
+        
+        // Position and orient tail cone at the end
+        const tailPosition = tubePathPoints[tubePathPoints.length - 1];
+        const beforeTail = tubePathPoints[Math.max(0, tubePathPoints.length - 2)];
+        
+        // Calculate direction and position hemisphere cap at tube end
+        const tailDirection = tailPosition.clone().sub(beforeTail).normalize();
+        
+        // Position hemisphere cap flush with tube end
+        const capOffset = tailDirection.clone().multiplyScalar(tubeRadius * 0.01);
+        tailCapMesh.position.copy(tailPosition).add(capOffset);
+        
+        // Orient the cap so the flat side aligns with tube end
+        tailCapMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tailDirection);
       }
 
       // Eat dots
@@ -216,39 +271,59 @@ export default function SphereSnakeGame() {
           dotsEatenLocal += 1;
           setDotsEaten(dotsEatenLocal);
           // Grow slowly: +1 segment per dot
-          segmentCount = Math.min(segmentCount + 1, bodyMeshes.length + 1);
+          segmentCount = Math.min(segmentCount + 1, 220);
           // Respawn quickly somewhere else.
           setTimeout(() => respawnDot(dot), 180);
         }
       }
 
-      // Check barrier collisions
+      // Check barrier collisions using precise distance to curve
       for (const barrier of barriers) {
-        const barrierPos = barrier.mesh.position;
-        if (headPos.distanceTo(barrierPos) < barrierRadius + 7) { // 7 is snake segment radius
-          // GAME OVER!
-          isGameOverRef.current = true;
-          setIsGameOver(true);
-          break;
+        if (barrier.curve && barrier.tubeRadius) {
+          // Sample points along the curve and find closest point
+          let minDistance = Infinity;
+          const samples = 30; // Increased samples for more accurate detection
+          
+          for (let i = 0; i <= samples; i++) {
+            const t = i / samples;
+            const curvePoint = barrier.curve.getPoint(t);
+            const distance = headPos.distanceTo(curvePoint);
+            if (distance < minDistance) {
+              minDistance = distance;
+            }
+          }
+          
+          // Collision if head is within combined radius (with buffer for forgiveness)
+          // 7 is snake head radius, using +4 instead of +6 for more forgiveness
+          if (minDistance < barrier.tubeRadius + 4) {
+            // GAME OVER!
+            console.log('Barrier collision! Distance:', minDistance, 'Barrier radius:', barrier.tubeRadius);
+            setCollisionType('barrier');
+            isGameOverRef.current = true;
+            setIsGameOver(true);
+            break;
+          }
         }
       }
 
       // Check self-collision (snake running into itself)
       // Only check if snake has grown beyond initial segments
       // Start checking from a safe distance to avoid neck collision
-      if (segmentCount > initialSegments + 3) {
-        for (let i = 8; i < segmentNormals.length - 1; i++) {
-          if (i >= bodyMeshes.length) break;
-          const bodySegment = bodyMeshes[i];
-          if (bodySegment.visible) {
-            const segmentPos = bodySegment.position;
-            const collisionDistance = 14; // Two segment radii (7 + 7)
-            if (headPos.distanceTo(segmentPos) < collisionDistance) {
-              // GAME OVER!
-              isGameOverRef.current = true;
-              setIsGameOver(true);
-              break;
-            }
+      if (segmentCount > initialSegments + 5) {
+        // Skip first 16 positions (neck area) to avoid false collisions
+        const startCheck = 16;
+        const endCheck = Math.min(segmentCount * 2, segmentNormals.length);
+        
+        for (let i = startCheck; i < endCheck; i++) {
+          const segmentPos = segmentNormals[i].clone().multiplyScalar(snakeRadius);
+          const collisionDistance = 13; // Slightly smaller for more forgiveness
+          if (headPos.distanceTo(segmentPos) < collisionDistance) {
+            // GAME OVER!
+            console.log('Self-collision! Distance:', headPos.distanceTo(segmentPos), 'at segment index:', i, 'segmentCount:', segmentCount);
+            setCollisionType('self');
+            isGameOverRef.current = true;
+            setIsGameOver(true);
+            break;
           }
         }
       }
@@ -294,6 +369,7 @@ export default function SphereSnakeGame() {
       cleanup();
       isGameOverRef.current = false;
       setIsGameOver(false);
+      setCollisionType('barrier');
       isPausedRef.current = false;
       setIsPaused(false);
       setDotsEaten(0);
@@ -429,8 +505,8 @@ export default function SphereSnakeGame() {
                 </div>
                 <p className="text-white/50 text-sm mt-4">
                   {controlType === 'keyboard' 
-                    ? 'Use arrow keys ← → to steer'
-                    : 'Move your mouse left/right to steer'}
+                    ? 'Use ↑ to go forward, ↓ to reverse, ← → to steer'
+                    : 'Hold left-click to go forward, right-click to reverse, move mouse to steer'}
                 </p>
               </div>
             </div>
@@ -470,18 +546,41 @@ export default function SphereSnakeGame() {
             Dots eaten: <span className="tabular-nums">{dotsEaten}</span>
           </div>
           <div className="pointer-events-none absolute left-4 top-4 rounded-lg bg-black/40 px-3 py-2 text-xs text-white/90 backdrop-blur">
-            Controls: <span className="font-semibold">{controlType === 'keyboard' ? '← / →' : 'Move Mouse'}</span> | <span className="font-semibold">P</span> to pause
+            Controls: <span className="font-semibold">{controlType === 'keyboard' ? '↑ forward | ↓ reverse | ← / → steer' : 'L-Click forward | R-Click reverse | Move Mouse to steer'}</span> | <span className="font-semibold">P</span> to pause
           </div>
         </>
       )}
       
       {/* Game State Overlays - only show when playing */}
       {menuScreen === 'playing' && isPaused && !isGameOver && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="absolute inset-0 flex items-center justify-center">
           <div className="rounded-xl bg-black/70 px-8 py-6 text-center backdrop-blur-sm">
             <div className="text-4xl font-bold text-white">PAUSED</div>
             <div className="mt-2 text-sm text-white/80">Press P to continue</div>
             <div className="mt-2 text-xs text-white/60">Press R to restart</div>
+            <div className="flex gap-4 justify-center mt-6">
+              <button
+                onClick={() => {
+                  setIsPaused(false);
+                  isPausedRef.current = false;
+                }}
+                className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg transition-all"
+              >
+                RESUME
+              </button>
+              <button
+                onClick={() => {
+                  setMenuScreen('main');
+                  setIsPaused(false);
+                  isPausedRef.current = false;
+                  setIsGameOver(false);
+                  isGameOverRef.current = false;
+                }}
+                className="px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white font-bold rounded-lg transition-all"
+              >
+                QUIT TO MENU
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -489,7 +588,9 @@ export default function SphereSnakeGame() {
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="rounded-xl bg-red-900/80 px-12 py-8 text-center backdrop-blur-sm border-2 border-red-500">
             <div className="text-5xl font-bold text-white mb-4">GAME OVER</div>
-            <div className="text-2xl text-white/90 mb-2">You hit a barrier!</div>
+            <div className="text-2xl text-white/90 mb-2">
+              {collisionType === 'barrier' ? 'You hit a barrier!' : 'You ran into yourself!'}
+            </div>
             <div className="text-xl text-white/80 mb-6">Final Score: <span className="font-bold tabular-nums">{dotsEaten}</span></div>
             <div className="flex gap-4 justify-center mt-6">
               <button
