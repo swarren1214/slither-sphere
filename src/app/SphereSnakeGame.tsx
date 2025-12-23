@@ -84,8 +84,8 @@ export default function SphereSnakeGame() {
     // Create world
     const { stars } = createWorld(scene, R);
 
-    // Create snake
-    const { headMesh, bodyMeshes } = createSnake(scene);
+    // Create snake with tube body
+    const { headMesh, tubeMesh, tailConeMesh, tubeRadius, tubularSegments, radialSegments, bodyMat } = createSnake(scene, R);
 
     // Snake state on the sphere
     let headNormal = new THREE.Vector3(0, 0, 1);
@@ -172,39 +172,69 @@ export default function SphereSnakeGame() {
       headingTangent.sub(headNormal.clone().multiplyScalar(headingTangent.dot(headNormal))).normalize();
 
       distanceAccumulator += moveSpeed * dt;
-      while (distanceAccumulator >= segmentSpacing) {
-        distanceAccumulator -= segmentSpacing;
-        // Shift all segment positions back by one
-        for (let i = segmentNormals.length - 1; i > 0; i--) {
-          segmentNormals[i].copy(segmentNormals[i - 1]);
-        }
-        // Set first position to current head
-        segmentNormals[0].copy(headNormal);
+      
+      // Record head position every frame for smooth trail
+      segmentNormals.unshift(headNormal.clone());
+      
+      // Keep only enough positions for the snake length plus buffer
+      const maxPositions = segmentCount * 3;
+      while (segmentNormals.length > maxPositions) {
+        segmentNormals.pop();
       }
 
       // Update snake meshes
       headMesh.position.copy(headNormal).multiplyScalar(snakeRadius);
       headMesh.lookAt(tmpVec.copy(headNormal).multiplyScalar(snakeRadius + 1));
 
-      // Interpolate body segments between stored positions for smooth movement
-      const alpha = distanceAccumulator / segmentSpacing; // 0..1
+      // Build smooth tube path using recent positions
+      const tubePathPoints: THREE.Vector3[] = [];
+      const positionsPerSegment = 3; // Sample every N positions for smoother tube
+      const totalPositions = Math.min(segmentCount * positionsPerSegment, segmentNormals.length);
       
-      for (let i = 0; i < bodyMeshes.length; i++) {
-        const m = bodyMeshes[i];
+      for (let i = 0; i < totalPositions; i += positionsPerSegment) {
+        tubePathPoints.push(segmentNormals[i].clone().multiplyScalar(snakeRadius));
+      }
+      
+      // Only update tube if we have enough points
+      if (tubePathPoints.length >= 2) {
+        const curve = new THREE.CatmullRomCurve3(tubePathPoints);
+        const newTubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, tubeRadius, radialSegments, false);
         
-        if (i < segmentCount - 1) {
-          m.visible = true;
-          
-          // Smoothly interpolate between consecutive trail positions
-          const a = segmentNormals[i];
-          const b = segmentNormals[i + 1] ?? segmentNormals[i];
-          
-          // Linear interpolation + normalize for smooth movement
-          const interpolatedNormal = new THREE.Vector3().lerpVectors(a, b, alpha).normalize();
-          m.position.copy(interpolatedNormal).multiplyScalar(snakeRadius);
-        } else {
-          m.visible = false;
+        // Add color variation pattern to make snake look cooler
+        const colors = new Float32Array(newTubeGeometry.attributes.position.count * 3);
+        const baseColor = new THREE.Color(0x19c15b);
+        const patternColor = new THREE.Color(0x0d8f3f);
+        
+        for (let i = 0; i < newTubeGeometry.attributes.position.count; i++) {
+          const segment = Math.floor((i / newTubeGeometry.attributes.position.count) * tubularSegments);
+          // Create stripe pattern every few segments
+          const isStripe = segment % 8 < 2;
+          const color = isStripe ? patternColor : baseColor;
+          colors[i * 3] = color.r;
+          colors[i * 3 + 1] = color.g;
+          colors[i * 3 + 2] = color.b;
         }
+        
+        newTubeGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        
+        tubeMesh.geometry.dispose();
+        tubeMesh.geometry = newTubeGeometry;
+        // Enable vertex colors on material
+        bodyMat.vertexColors = true;
+        
+        // Position and orient tail cone at the end
+        const tailPosition = tubePathPoints[tubePathPoints.length - 1];
+        const beforeTail = tubePathPoints[Math.max(0, tubePathPoints.length - 2)];
+        
+        // Calculate direction and position cone base at tube end
+        const tailDirection = tailPosition.clone().sub(beforeTail).normalize();
+        
+        // Offset cone base slightly toward the tube to eliminate gap
+        const coneBaseOffset = tailDirection.clone().multiplyScalar(-tubeRadius * 0.1);
+        tailConeMesh.position.copy(tailPosition).add(coneBaseOffset);
+        
+        // Point cone tip away from body
+        tailConeMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tailDirection);
       }
 
       // Eat dots
@@ -216,7 +246,7 @@ export default function SphereSnakeGame() {
           dotsEatenLocal += 1;
           setDotsEaten(dotsEatenLocal);
           // Grow slowly: +1 segment per dot
-          segmentCount = Math.min(segmentCount + 1, bodyMeshes.length + 1);
+          segmentCount = Math.min(segmentCount + 1, 220);
           // Respawn quickly somewhere else.
           setTimeout(() => respawnDot(dot), 180);
         }
@@ -238,17 +268,14 @@ export default function SphereSnakeGame() {
       // Start checking from a safe distance to avoid neck collision
       if (segmentCount > initialSegments + 3) {
         for (let i = 8; i < segmentNormals.length - 1; i++) {
-          if (i >= bodyMeshes.length) break;
-          const bodySegment = bodyMeshes[i];
-          if (bodySegment.visible) {
-            const segmentPos = bodySegment.position;
-            const collisionDistance = 14; // Two segment radii (7 + 7)
-            if (headPos.distanceTo(segmentPos) < collisionDistance) {
-              // GAME OVER!
-              isGameOverRef.current = true;
-              setIsGameOver(true);
-              break;
-            }
+          if (i >= segmentCount) break;
+          const segmentPos = segmentNormals[i].clone().multiplyScalar(snakeRadius);
+          const collisionDistance = 14; // Tube diameter
+          if (headPos.distanceTo(segmentPos) < collisionDistance) {
+            // GAME OVER!
+            isGameOverRef.current = true;
+            setIsGameOver(true);
+            break;
           }
         }
       }
